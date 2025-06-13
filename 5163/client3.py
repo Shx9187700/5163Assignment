@@ -77,6 +77,57 @@ def check_crl(cert: x509.Certificate) -> bool:
         return cert.serial_number in {r.serial_number for r in crl}
     return False
 
+def verify_certificate_chain(cert: x509.Certificate) -> bool:
+    """
+    Verify the certificate chain and check CRL revocation status at each level.
+    """
+    try:
+        # Step 1: Check if current certificate is revoked
+        if check_crl(cert):
+            print("❌ Certificate is revoked according to CRL.")
+            return False
+
+        # Step 2: Extract issuer Common Name (CN) and normalize
+        issuer_cn = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        issuer_cn_normalized = issuer_cn.lower().replace(" ", "")  # normalize for consistent matching
+
+        # Step 3: Map normalized issuer CN to corresponding cert file
+        if "subca1" in issuer_cn_normalized:
+            issuer_cert_file = "sub_ca1_cert.pem"
+        elif "subca2" in issuer_cn_normalized:
+            issuer_cert_file = "sub_ca2_cert.pem"
+        elif "myrootca" in issuer_cn_normalized:
+            issuer_cert_file = "root_cert.pem"
+        else:
+            print("❌ Unknown issuer, cannot verify chain.")
+            return False
+
+        if not os.path.exists(issuer_cert_file):
+            print(f"❌ Issuer cert file {issuer_cert_file} not found.")
+            return False
+
+        # Step 4: Load issuer certificate
+        with open(issuer_cert_file, "rb") as f:
+            issuer_cert = x509.load_pem_x509_certificate(f.read())
+
+        # Step 5: Verify the signature of the current certificate
+        issuer_cert.public_key().verify(
+            signature=cert.signature,
+            data=cert.tbs_certificate_bytes,
+            padding=padding.PKCS1v15(),
+            algorithm=cert.signature_hash_algorithm,
+        )
+
+        # Step 6: Recursively verify the issuer's certificate unless it's the Root CA
+        if issuer_cn_normalized != "myrootca":
+            return verify_certificate_chain(issuer_cert)
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Certificate chain verification failed: {e}")
+        return False
+
 # === Request a certificate from Sub CA (encrypted CSR) ===
 def request_certificate():
     target = input(f"📥 {client_name}: Enter Sub CA to apply (e.g., sub1 or sub2): ").strip().lower()
@@ -156,6 +207,11 @@ def listen_mode():
 
                         if check_crl(cert):
                             print("❌ Peer certificate is revoked. Disconnecting.")
+                            return
+
+                        # ✅ NEW: Verify full trust chain
+                        if not verify_certificate_chain(cert):
+                            print("❌ Certificate chain verification failed. Disconnecting.")
                             return
 
                         message = conn.recv(1024).decode()
